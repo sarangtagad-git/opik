@@ -226,4 +226,27 @@ public class OptimizationsResource {
         log.info("Generated logs URL for Studio optimization id: '{}'", id);
         return Response.ok(logs).build();
     }
+
+    //Added
+    @POST
+    @Path("/{id}/heartbeat")
+    @Operation(
+    operationId = "heartbeatOptimization",
+    summary = "Heartbeat optimization",
+    description = "Updates lastUpdatedAt to indicate optimization is still running",
+    responses = {
+            @ApiResponse(responseCode = "204", description = "Heartbeat recorded"),
+            @ApiResponse(responseCode = "404", description = "Optimization not found",
+            content = @Content(schema = @Schema(implementation = ErrorMessage.class)))
+    }
+    )
+    public Response heartbeat(@PathParam("id") UUID id) {
+    log.debug("Received heartbeat for optimization '{}'", id);
+
+    optimizationService.heartbeat(id)
+            .contextWrite(ctx -> setRequestContext(ctx, requestContext))
+            .block();
+
+    return Response.noContent().build();
+    }
 }

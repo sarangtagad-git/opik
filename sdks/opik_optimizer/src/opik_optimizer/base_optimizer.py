@@ -21,6 +21,8 @@ from .api_objects import chat_prompt
 from .optimizable_agent import OptimizableAgent
 from .utils import create_litellm_agent_class
 from . import task_evaluator, helpers
+##Added
+import threading
 
 # Don't use unsupported params:
 litellm.drop_params = True
@@ -48,6 +50,13 @@ class OptimizationRound(BaseModel):
 
 
 class BaseOptimizer(ABC):
+
+    #Added
+    # Heartbeat defaults:
+    # Intentionally large to avoid UI re-render churn
+    _HEARTBEAT_INTERVAL_SEC = 600       # 10 minutes
+    _HEARTBEAT_INITIAL_DELAY_SEC = 600  # 10 minutes
+
     def __init__(
         self,
         model: str,
@@ -84,6 +93,54 @@ class BaseOptimizer(ABC):
         self.current_optimization_id: str | None = None  # Track current optimization
         self.project_name: str = "Optimization"  # Default project name
 
+        #Added
+        # Heartbeat state
+        self._heartbeat_thread: _HeartbeatThread | None = None
+    
+    def _send_heartbeat(self) -> None:
+        
+        if not self.current_optimization_id:
+            return
+
+        try:
+            self.opik_client._request(
+                method="POST",
+                path=f"/v1/private/optimizations/{self.current_optimization_id}/heartbeat",
+            )
+        except Exception as exc:
+            logger.debug("Heartbeat failed: %s", exc)
+
+    def _start_heartbeat(self) -> None:
+        """
+        Start background heartbeat thread.
+        Safe to call multiple times.
+        """
+        if self._heartbeat_thread is not None:
+            return
+        if not self.current_optimization_id:
+            return
+
+        self._heartbeat_thread = _HeartbeatThread(
+            send_fn=self._send_heartbeat,
+            interval_sec=self._HEARTBEAT_INTERVAL_SEC,
+            initial_delay_sec=self._HEARTBEAT_INITIAL_DELAY_SEC,
+        )
+        self._heartbeat_thread.start()
+
+        logger.debug(
+            "Started heartbeat for optimization %s",
+            self.current_optimization_id,
+        )
+
+    def _stop_heartbeat(self) -> None:
+        """
+        Stop heartbeat thread if running.
+        """
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.stop()
+            self._heartbeat_thread = None
+            logger.debug("Stopped heartbeat")
+
     def _reset_counters(self) -> None:
         """Reset all call counters for a new optimization run."""
         self.llm_call_counter = 0
@@ -102,6 +159,8 @@ class BaseOptimizer(ABC):
         Clean up resources and perform memory management.
         Should be called when the optimizer is no longer needed.
         """
+        # Stop heartbeat first
+        self._stop_heartbeat()
         # Reset counters
         self._reset_counters()
 
@@ -601,3 +660,31 @@ class BaseOptimizer(ABC):
             verbose=verbose,
         )
         return score
+
+class _HeartbeatThread(threading.Thread):
+    """
+    Background thread that periodically sends a heartbeat
+    for the current optimization.
+    """
+
+    def __init__(self, send_fn: Callable[[], None], interval_sec: int, initial_delay_sec: int = 600):
+        super().__init__(daemon=True)
+        self._send_fn = send_fn
+        self._interval = interval_sec
+        self._stop_event = threading.Event()
+        self._initial_delay = initial_delay_sec
+
+    def run(self) -> None:
+        # Delay first heartbeat
+        if self._initial_delay > 0:
+            if self._stop_event.wait(self._initial_delay):
+                return
+        while not self._stop_event.wait(self._interval):
+            try:
+                self._send_fn()
+            except Exception:
+                # Heartbeat must never crash optimization
+                pass
+
+    def stop(self) -> None:
+        self._stop_event.set()

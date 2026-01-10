@@ -68,6 +68,9 @@ public interface OptimizationDAO {
     Mono<Optimization.OptimizationPage> find(int page, int size, @NonNull OptimizationSearchCriteria searchCriteria);
 
     Flux<OptimizationSummary> findOptimizationSummaryByDatasetIds(Set<UUID> datasetIds);
+
+    //Added
+    Mono<Void> updateLastUpdatedAt(@NonNull UUID optimizationId);
 }
 
 @Singleton
@@ -359,6 +362,32 @@ class OptimizationDAOImpl implements OptimizationDAO {
                 LIMIT 1 BY id
             )
             GROUP BY dataset_id
+            ;
+            """;
+
+    //Added
+    private static final String UPDATE_LAST_UPDATED_AT = """
+            INSERT INTO optimizations (
+                id, dataset_id, name, workspace_id, objective_name, status, metadata, created_at, created_by, last_updated_at, last_updated_by, studio_config
+            )
+            SELECT
+                id,
+                dataset_id,
+                name,
+                workspace_id,
+                objective_name,
+                status,
+                metadata,
+                created_at,
+                created_by,
+                now64(6) AS last_updated_at,
+                :user_name AS last_updated_by,
+                studio_config                
+            FROM optimizations
+            WHERE id = :id
+            AND workspace_id = :workspace_id
+            ORDER BY id DESC, last_updated_at DESC
+            LIMIT 1
             ;
             """;
 
@@ -703,5 +732,24 @@ class OptimizationDAOImpl implements OptimizationDAO {
         statement.bind("id", id);
 
         return statement;
+    }
+
+    @Override
+    public Mono<Void> updateLastUpdatedAt(@NonNull UUID optimizationId) {
+        log.debug("Heartbeat update for optimization '{}'", optimizationId);
+
+        return Mono.from(connectionFactory.create())
+                .flatMapMany(connection -> {
+                    Statement statement = connection.createStatement(UPDATE_LAST_UPDATED_AT)
+                            .bind("id", optimizationId);
+
+                    // binds user_name + workspace_id automatically
+                    return makeFluxContextAware(
+                            bindUserNameAndWorkspaceContextToStream(statement)
+                    );
+                })
+                .flatMap(Result::getRowsUpdated)
+                .reduce(Long::sum)
+                .then();
     }
 }

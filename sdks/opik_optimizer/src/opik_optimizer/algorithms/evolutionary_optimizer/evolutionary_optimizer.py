@@ -433,536 +433,548 @@ class EvolutionaryOptimizer(BaseOptimizer):
 
         # Step 0. Start Opik optimization run
         opik_optimization_run: optimization.Optimization | None = None
+        
         try:
-            opik_optimization_run = self.opik_client.create_optimization(
-                dataset_name=dataset.name,
-                objective_name=metric.__name__,
-                metadata=self._build_optimization_metadata(),
-                name=self.name,
-                optimization_id=optimization_id,
-            )
-            self.current_optimization_id = opik_optimization_run.id
-        except Exception as e:
-            logger.warning(f"Opik server error: {e}. Continuing without Opik tracking.")
-            self.current_optimization_id = None
-
-        reporting.display_header(
-            algorithm=self.__class__.__name__,
-            optimization_id=self.current_optimization_id,
-            dataset_id=dataset.id,
-            verbose=self.verbose,
-        )
-
-        reporting.display_configuration(
-            prompt.get_messages(),
-            {
-                "optimizer": f"{'DEAP MOO' if self.enable_moo else 'DEAP SO'} Evolutionary Optimization",
-                "population_size": self.population_size,
-                "generations": self.num_generations,
-                "mutation_rate": self.mutation_rate,
-                "crossover_rate": self.crossover_rate,
-            },
-            verbose=self.verbose,
-            tools=getattr(prompt, "tools", None),
-        )
-
-        # Step 1. Step variables and define fitness function
-        self._reset_counters()  # Reset counters for run
-        trials_used = [0]  # Use list for closure mutability
-        self._history: list[OptimizationRound] = []
-        self._current_generation = 0
-        self._best_fitness_history = []
-        self._generations_without_improvement = 0
-        self._current_population = []
-        self._generations_without_overall_improvement = 0
-
-        if self.enable_moo:
-
-            def _deap_evaluate_individual_fitness(
-                messages: list[dict[str, str]],
-            ) -> tuple[float, ...]:
-                # Check if we've hit the limit
-                if trials_used[0] >= max_trials:
-                    logger.debug(
-                        f"Skipping evaluation - max_trials ({max_trials}) reached"
-                    )
-                    return (-float("inf"), float("inf"))  # Worst possible fitness
-
-                trials_used[0] += 1
-
-                primary_fitness_score = evaluation_ops.evaluate_prompt(
-                    self,
-                    prompt,
-                    messages,  # type: ignore
-                    dataset=evaluation_dataset,  # use right dataset for scoring
-                    metric=metric,
-                    n_samples=n_samples,
-                    experiment_config=(experiment_config or {}).copy(),
-                    optimization_id=self.current_optimization_id,
-                    verbose=0,
-                    **evaluation_kwargs,
+            try:
+                opik_optimization_run = self.opik_client.create_optimization(
+                    dataset_name=dataset.name,
+                    objective_name=metric.__name__,
+                    metadata=self._build_optimization_metadata(),
+                    name=self.name,
+                    optimization_id=optimization_id,
                 )
-                prompt_length = float(len(str(json.dumps(messages))))
-                return (primary_fitness_score, prompt_length)
-
-        else:
-            # Single-objective
-            def _deap_evaluate_individual_fitness(
-                messages: list[dict[str, str]],
-            ) -> tuple[float, ...]:
-                # Check if we've hit the limit
-                if trials_used[0] >= max_trials:
-                    logger.debug(
-                        f"Skipping evaluation - max_trials ({max_trials}) reached"
-                    )
-                    return (-float("inf"),)  # Worst possible fitness
-
-                trials_used[0] += 1
-
-                fitness_score = evaluation_ops.evaluate_prompt(
-                    self,
-                    prompt,
-                    messages,
-                    dataset=evaluation_dataset,  # use right dataset for scoring
-                    metric=metric,
-                    n_samples=n_samples,
-                    experiment_config=(experiment_config or {}).copy(),
-                    optimization_id=self.current_optimization_id,
-                    verbose=0,
-                    **evaluation_kwargs,
-                )
-                return (fitness_score,)
-
-        self._deap_evaluate_individual_fitness = _deap_evaluate_individual_fitness
-
-        # Step 2. Compute the initial performance of the prompt
-        with reporting.baseline_performance(
-            verbose=self.verbose
-        ) as report_baseline_performance:
-            initial_eval_result = self._deap_evaluate_individual_fitness(
-                prompt.get_messages()
-            )  # type: ignore
-            initial_primary_score = initial_eval_result[0]
-            initial_length = (
-                initial_eval_result[1]
-                if self.enable_moo
-                else float(len(json.dumps(prompt.get_messages())))
-            )
-
-            trials_used[0] = 0
-            best_primary_score_overall = initial_primary_score
-            best_prompt_overall = prompt
-            report_baseline_performance.set_score(initial_primary_score)
-
-        # Step 3. Define the output style guide
-        effective_output_style_guidance = self.output_style_guidance
-        if self.infer_output_style and (
-            self.output_style_guidance is None
-            or self.output_style_guidance == self.DEFAULT_OUTPUT_STYLE_GUIDANCE
-        ):
-            # If user wants inference AND hasn't provided a specific custom guidance
-            inferred_style = style_ops.infer_output_style_from_dataset(
-                dataset=dataset,
-                model=self.model,
-                model_parameters=self.model_parameters,
-                verbose=self.verbose,
-            )
-            if inferred_style:
-                effective_output_style_guidance = inferred_style
-                # Update self.output_style_guidance for this run so dynamic prompt methods use it
-                self.output_style_guidance = inferred_style
-            else:
+                self.current_optimization_id = opik_optimization_run.id
+            except Exception as e:
                 logger.warning(
-                    "Failed to infer output style, using default or user-provided guidance."
+                    f"Opik server error: {e}. Continuing without Opik tracking."
                 )
+                self.current_optimization_id = None
 
-        # Ensure self.output_style_guidance is set to the effective one for the rest of the methods for this run
-        # (It might have been None if user passed None and infer_output_style was False)
-        if self.output_style_guidance is None:
-            # Fallback if still None
-            self.output_style_guidance = self.DEFAULT_OUTPUT_STYLE_GUIDANCE
+            # ✅ START HEARTBEAT
+            if self.current_optimization_id:
+                self._start_heartbeat()
 
-        # Step 4. Initialize population
-        initial_prompts: list[chat_prompt.ChatPrompt] = (
-            population_ops.initialize_population(
-                prompt=prompt,
-                output_style_guidance=effective_output_style_guidance,
-                mcp_context=self._mcp_context,
-                model=self.model,
-                model_parameters=self.model_parameters,
+            reporting.display_header(
+                algorithm=self.__class__.__name__,
                 optimization_id=self.current_optimization_id,
-                population_size=self.population_size,
+                dataset_id=dataset.id,
                 verbose=self.verbose,
             )
-        )
 
-        deap_population = [
-            self._create_individual_from_prompt(p) for p in initial_prompts
-        ]
-        deap_population = deap_population[: self.population_size]
-
-        # Step 5. Initialize the hall of fame (Pareto front for MOO) and stats for MOO or SO
-        if self.enable_moo:
-            hof = tools.ParetoFront()
-        else:
-            # Single-objective
-            hof = tools.HallOfFame(self.DEFAULT_HALL_OF_FAME_SIZE)
-
-        # Step 6. Evaluate the initial population
-        with reporting.evaluate_initial_population(
-            verbose=self.verbose
-        ) as report_initial_population:
-            fitnesses: list[Any] = list(
-                map(self._deap_evaluate_individual_fitness, deap_population)
-            )
-            _best_score = max(
-                best_primary_score_overall, max([x[0] for x in fitnesses])
+            reporting.display_configuration(
+                prompt.get_messages(),
+                {
+                    "optimizer": f"{'DEAP MOO' if self.enable_moo else 'DEAP SO'} Evolutionary Optimization",
+                    "population_size": self.population_size,
+                    "generations": self.num_generations,
+                    "mutation_rate": self.mutation_rate,
+                    "crossover_rate": self.crossover_rate,
+                },
+                verbose=self.verbose,
+                tools=getattr(prompt, "tools", None),
             )
 
-            for i, ind, fit in zip(
-                range(len(deap_population)), deap_population, fitnesses
-            ):
-                if self.enable_moo:
-                    ind.fitness.values = fit
-                else:
-                    ind.fitness.values = tuple([fit[0]])
-                report_initial_population.set_score(i, fit[0], _best_score)
+            # Step 1. Step variables and define fitness function
+            self._reset_counters()  # Reset counters for run
+            trials_used = [0]  # Use list for closure mutability
+            self._history: list[OptimizationRound] = []
+            self._current_generation = 0
+            self._best_fitness_history = []
+            self._generations_without_improvement = 0
+            self._current_population = []
+            self._generations_without_overall_improvement = 0
 
-        hof.update(deap_population)
-
-        if hof and len(hof) > 0:
             if self.enable_moo:
-                current_best_for_primary: Any = max(
-                    hof, key=lambda ind: ind.fitness.values[0]
-                )
-                best_primary_score_overall = current_best_for_primary.fitness.values[0]
-                best_prompt_overall = chat_prompt.ChatPrompt(
-                    messages=current_best_for_primary,
-                    tools=getattr(current_best_for_primary, "tools", prompt.tools),
-                    function_map=getattr(
-                        current_best_for_primary, "function_map", prompt.function_map
-                    ),
-                    model=getattr(current_best_for_primary, "model", prompt.model),
-                    model_parameters=getattr(
-                        current_best_for_primary, "model_kwargs", prompt.model_kwargs
-                    ),
-                )
+
+                def _deap_evaluate_individual_fitness(
+                    messages: list[dict[str, str]],
+                ) -> tuple[float, ...]:
+                    # Check if we've hit the limit
+                    if trials_used[0] >= max_trials:
+                        logger.debug(
+                            f"Skipping evaluation - max_trials ({max_trials}) reached"
+                        )
+                        return (-float("inf"), float("inf"))  # Worst possible fitness
+
+                    trials_used[0] += 1
+
+                    primary_fitness_score = evaluation_ops.evaluate_prompt(
+                        self,
+                        prompt,
+                        messages,  # type: ignore
+                        dataset=evaluation_dataset,  # use right dataset for scoring
+                        metric=metric,
+                        n_samples=n_samples,
+                        experiment_config=(experiment_config or {}).copy(),
+                        optimization_id=self.current_optimization_id,
+                        verbose=0,
+                        **evaluation_kwargs,
+                    )
+                    prompt_length = float(len(str(json.dumps(messages))))
+                    return (primary_fitness_score, prompt_length)
+
             else:
                 # Single-objective
-                current_best_on_front = hof[0]
-                best_primary_score_overall = current_best_on_front.fitness.values[0]
-                best_prompt_overall = chat_prompt.ChatPrompt(
-                    messages=current_best_on_front,
-                    tools=getattr(current_best_on_front, "tools", prompt.tools),
-                    function_map=getattr(
-                        current_best_on_front, "function_map", prompt.function_map
-                    ),
-                    model=getattr(current_best_on_front, "model", prompt.model),
-                    model_parameters=getattr(
-                        current_best_on_front, "model_kwargs", prompt.model_kwargs
-                    ),
-                )
-
-            if self.enable_moo:
-                logger.info(
-                    f"Gen {0}: New best primary score: {best_primary_score_overall:.4f}, Prompt: {json.dumps(best_prompt_overall.get_messages())[:100]}..."
-                )
-            else:
-                logger.info(
-                    f"Gen {0}: New best score: {best_primary_score_overall:.4f}"
-                )
-
-            # Simplified history logging for this transition
-            initial_round_data = OptimizationRound(
-                round_number=0,
-                current_prompt=best_prompt_overall,  # Representative best
-                current_score=best_primary_score_overall,
-                generated_prompts=[
-                    {
-                        "prompt": best_prompt_overall,
-                        "score": best_primary_score_overall,
-                        "trial_scores": [best_primary_score_overall],
-                    }
-                ],
-                best_prompt=best_prompt_overall,
-                best_score=best_primary_score_overall,
-                improvement=0.0,
-            )
-            self._add_to_history(initial_round_data)
-
-        with reporting.start_evolutionary_algo(
-            verbose=self.verbose
-        ) as report_evolutionary_algo:
-            for generation_idx in range(1, self.num_generations + 1):
-                # Check if we've exhausted our evaluation budget
-                if trials_used[0] >= max_trials:
-                    logger.info(
-                        f"Stopping optimization: max_trials ({max_trials}) reached after {generation_idx - 1} generations"
-                    )
-                    break
-
-                report_evolutionary_algo.start_gen(generation_idx, self.num_generations)
-
-                curr_best_score = self._population_best_score(deap_population)
-
-                # ---------- restart logic -------------------------------------
-                (
-                    should_restart,
-                    gens_since_pop_improvement,
-                    best_primary_score_history,
-                ) = population_ops.should_restart_population(
-                    curr_best=curr_best_score,
-                    best_primary_score_history=self._best_primary_score_history,
-                    gens_since_pop_improvement=self._gens_since_pop_improvement,
-                    default_restart_threshold=self.DEFAULT_RESTART_THRESHOLD,
-                    default_restart_generations=self.DEFAULT_RESTART_GENERATIONS,
-                )
-                self._gens_since_pop_improvement = gens_since_pop_improvement
-                self._best_primary_score_history = best_primary_score_history
-
-                if should_restart:
-                    report_evolutionary_algo.restart_population(
-                        self.DEFAULT_RESTART_GENERATIONS
-                    )
-                    deap_population = population_ops.restart_population(
-                        optimizer=self,
-                        hof=hof,
-                        population=deap_population,
-                        best_prompt_so_far=best_prompt_overall,
-                    )
-
-                # ---------- run one generation --------------------------------
-                deap_population, invalid_count = self._run_generation(
-                    generation_idx,
-                    deap_population,
-                    prompt,
-                    hof,
-                    report_evolutionary_algo,
-                    best_primary_score_overall,
-                )
-
-                # -------- update best-prompt bookkeeping -------------------------
-                previous_best_primary_score_for_gen = best_primary_score_overall
-                if hof:
-                    if self.enable_moo:
-                        current_best_ind = max(
-                            hof, key=lambda ind: ind.fitness.values[0]
+                def _deap_evaluate_individual_fitness(
+                    messages: list[dict[str, str]],
+                ) -> tuple[float, ...]:
+                    # Check if we've hit the limit
+                    if trials_used[0] >= max_trials:
+                        logger.debug(
+                            f"Skipping evaluation - max_trials ({max_trials}) reached"
                         )
-                    else:
-                        current_best_ind = hof[0]
+                        return (-float("inf"),)  # Worst possible fitness
 
-                    updated_best_primary_score = current_best_ind.fitness.values[0]
-                    if updated_best_primary_score > best_primary_score_overall:
-                        best_primary_score_overall = updated_best_primary_score
-                        self._generations_without_overall_improvement = 0
-                    elif (
-                        updated_best_primary_score
-                        == previous_best_primary_score_for_gen
-                    ):
-                        self._generations_without_overall_improvement += 1
-                    else:
-                        self._generations_without_overall_improvement += 1
-                else:
-                    self._generations_without_overall_improvement += 1
+                    trials_used[0] += 1
 
-                # ---------- early-stopping check ------------------------------
-                if (
-                    self._generations_without_overall_improvement
-                    >= self.DEFAULT_EARLY_STOPPING_GENERATIONS
-                ):
-                    logger.info(
-                        "No overall improvement for %d generations – early stopping at gen %d.",
-                        self.DEFAULT_EARLY_STOPPING_GENERATIONS,
-                        generation_idx,
+                    fitness_score = evaluation_ops.evaluate_prompt(
+                        self,
+                        prompt,
+                        messages,
+                        dataset=evaluation_dataset,  # use right dataset for scoring
+                        metric=metric,
+                        n_samples=n_samples,
+                        experiment_config=(experiment_config or {}).copy(),
+                        optimization_id=self.current_optimization_id,
+                        verbose=0,
+                        **evaluation_kwargs,
                     )
-                    break
+                    return (fitness_score,)
 
-                # History logging for this transition
-                # FIXME: Use model.dump() instead of dict()
-                gen_round_data = OptimizationRound(
-                    round_number=generation_idx,
+            self._deap_evaluate_individual_fitness = _deap_evaluate_individual_fitness
+
+            # Step 2. Compute the initial performance of the prompt
+            with reporting.baseline_performance(
+                verbose=self.verbose
+            ) as report_baseline_performance:
+                initial_eval_result = self._deap_evaluate_individual_fitness(
+                    prompt.get_messages()
+                )  # type: ignore
+                initial_primary_score = initial_eval_result[0]
+                initial_length = (
+                    initial_eval_result[1]
+                    if self.enable_moo
+                    else float(len(json.dumps(prompt.get_messages())))
+                )
+
+                trials_used[0] = 0
+                best_primary_score_overall = initial_primary_score
+                best_prompt_overall = prompt
+                report_baseline_performance.set_score(initial_primary_score)
+
+            # Step 3. Define the output style guide
+            effective_output_style_guidance = self.output_style_guidance
+            if self.infer_output_style and (
+                self.output_style_guidance is None
+                or self.output_style_guidance == self.DEFAULT_OUTPUT_STYLE_GUIDANCE
+            ):
+                # If user wants inference AND hasn't provided a specific custom guidance
+                inferred_style = style_ops.infer_output_style_from_dataset(
+                    dataset=dataset,
+                    model=self.model,
+                    model_parameters=self.model_parameters,
+                    verbose=self.verbose,
+                )
+                if inferred_style:
+                    effective_output_style_guidance = inferred_style
+                    # Update self.output_style_guidance for this run so dynamic prompt methods use it
+                    self.output_style_guidance = inferred_style
+                else:
+                    logger.warning(
+                        "Failed to infer output style, using default or user-provided guidance."
+                    )
+
+            # Ensure self.output_style_guidance is set to the effective one for the rest of the methods for this run
+            # (It might have been None if user passed None and infer_output_style was False)
+            if self.output_style_guidance is None:
+                # Fallback if still None
+                self.output_style_guidance = self.DEFAULT_OUTPUT_STYLE_GUIDANCE
+
+            # Step 4. Initialize population
+            initial_prompts: list[chat_prompt.ChatPrompt] = (
+                population_ops.initialize_population(
+                    prompt=prompt,
+                    output_style_guidance=effective_output_style_guidance,
+                    mcp_context=self._mcp_context,
+                    model=self.model,
+                    model_parameters=self.model_parameters,
+                    optimization_id=self.current_optimization_id,
+                    population_size=self.population_size,
+                    verbose=self.verbose,
+                )
+            )
+
+            deap_population = [
+                self._create_individual_from_prompt(p) for p in initial_prompts
+            ]
+            deap_population = deap_population[: self.population_size]
+
+            # Step 5. Initialize the hall of fame (Pareto front for MOO) and stats for MOO or SO
+            if self.enable_moo:
+                hof = tools.ParetoFront()
+            else:
+                # Single-objective
+                hof = tools.HallOfFame(self.DEFAULT_HALL_OF_FAME_SIZE)
+
+            # Step 6. Evaluate the initial population
+            with reporting.evaluate_initial_population(
+                verbose=self.verbose
+            ) as report_initial_population:
+                fitnesses: list[Any] = list(
+                    map(self._deap_evaluate_individual_fitness, deap_population)
+                )
+                _best_score = max(
+                    best_primary_score_overall, max([x[0] for x in fitnesses])
+                )
+
+                for i, ind, fit in zip(
+                    range(len(deap_population)), deap_population, fitnesses
+                ):
+                    if self.enable_moo:
+                        ind.fitness.values = fit
+                    else:
+                        ind.fitness.values = tuple([fit[0]])
+                    report_initial_population.set_score(i, fit[0], _best_score)
+
+            hof.update(deap_population)
+
+            if hof and len(hof) > 0:
+                if self.enable_moo:
+                    current_best_for_primary: Any = max(
+                        hof, key=lambda ind: ind.fitness.values[0]
+                    )
+                    best_primary_score_overall = current_best_for_primary.fitness.values[0]
+                    best_prompt_overall = chat_prompt.ChatPrompt(
+                        messages=current_best_for_primary,
+                        tools=getattr(current_best_for_primary, "tools", prompt.tools),
+                        function_map=getattr(
+                            current_best_for_primary, "function_map", prompt.function_map
+                        ),
+                        model=getattr(current_best_for_primary, "model", prompt.model),
+                        model_parameters=getattr(
+                            current_best_for_primary, "model_kwargs", prompt.model_kwargs
+                        ),
+                    )
+                else:
+                    # Single-objective
+                    current_best_on_front = hof[0]
+                    best_primary_score_overall = current_best_on_front.fitness.values[0]
+                    best_prompt_overall = chat_prompt.ChatPrompt(
+                        messages=current_best_on_front,
+                        tools=getattr(current_best_on_front, "tools", prompt.tools),
+                        function_map=getattr(
+                            current_best_on_front, "function_map", prompt.function_map
+                        ),
+                        model=getattr(current_best_on_front, "model", prompt.model),
+                        model_parameters=getattr(
+                            current_best_on_front, "model_kwargs", prompt.model_kwargs
+                        ),
+                    )
+
+                if self.enable_moo:
+                    logger.info(
+                        f"Gen {0}: New best primary score: {best_primary_score_overall:.4f}, Prompt: {json.dumps(best_prompt_overall.get_messages())[:100]}..."
+                    )
+                else:
+                    logger.info(
+                        f"Gen {0}: New best score: {best_primary_score_overall:.4f}"
+                    )
+
+                # Simplified history logging for this transition
+                initial_round_data = OptimizationRound(
+                    round_number=0,
                     current_prompt=best_prompt_overall,  # Representative best
                     current_score=best_primary_score_overall,
                     generated_prompts=[
-                        {"prompt": str(ind), "score": ind.fitness.values[0]}
-                        for ind in deap_population
-                        if ind.fitness.valid
+                        {
+                            "prompt": best_prompt_overall,
+                            "score": best_primary_score_overall,
+                            "trial_scores": [best_primary_score_overall],
+                        }
                     ],
                     best_prompt=best_prompt_overall,
                     best_score=best_primary_score_overall,
-                    improvement=(
-                        (best_primary_score_overall - initial_primary_score)
-                        / abs(initial_primary_score)
-                        if initial_primary_score and initial_primary_score != 0
-                        else (1.0 if best_primary_score_overall > 0 else 0.0)
-                    ),
+                    improvement=0.0,
                 )
-                self._add_to_history(gen_round_data)
+                self._add_to_history(initial_round_data)
 
-        stopped_early_flag = (
-            self._generations_without_overall_improvement
-            >= self.DEFAULT_EARLY_STOPPING_GENERATIONS
-        )
-        final_details = {}
-        initial_score_for_display = initial_primary_score
+            with reporting.start_evolutionary_algo(
+                verbose=self.verbose
+            ) as report_evolutionary_algo:
+                for generation_idx in range(1, self.num_generations + 1):
+                    # Check if we've exhausted our evaluation budget
+                    if trials_used[0] >= max_trials:
+                        logger.info(
+                            f"Stopping optimization: max_trials ({max_trials}) reached after {generation_idx - 1} generations"
+                        )
+                        break
 
-        if self.enable_moo:
-            final_results_log = "Pareto Front Solutions:\n"
-            if hof and len(hof) > 0:
-                sorted_hof = sorted(
-                    hof, key=lambda ind: ind.fitness.values[0], reverse=True
-                )
-                for i, sol in enumerate(sorted_hof):
-                    final_results_log += f"  Solution {i + 1}: Primary Score={sol.fitness.values[0]:.4f}, Length={sol.fitness.values[1]:.0f}, Prompt='{str(sol)[:100]}...'\n"
-                best_overall_solution = sorted_hof[0]
-                final_best_prompt = chat_prompt.ChatPrompt(
-                    messages=best_overall_solution,
-                    tools=getattr(best_overall_solution, "tools", prompt.tools),
-                    function_map=getattr(
-                        best_overall_solution, "function_map", prompt.function_map
-                    ),
-                    model=getattr(best_overall_solution, "model", prompt.model),
-                    model_parameters=getattr(
-                        best_overall_solution, "model_kwargs", prompt.model_kwargs
-                    ),
-                )
-                final_primary_score = best_overall_solution.fitness.values[0]
-                final_length = best_overall_solution.fitness.values[1]
-                logger.info(final_results_log)
-                logger.info(
-                    f"Representative best prompt (highest primary score from Pareto front): '{final_best_prompt}'"
-                )
-                logger.info(
-                    f"  Primary Score ({metric.__name__}): {final_primary_score:.4f}"
-                )
-                logger.info(f"  Length: {final_length:.0f}")
-                final_details.update(
-                    {
-                        "initial_primary_score": initial_primary_score,
-                        "initial_length": initial_length,
-                        "final_prompt_representative": final_best_prompt,
-                        "final_primary_score_representative": final_primary_score,
-                        "final_length_representative": final_length,
-                        "pareto_front_solutions": (
-                            [
-                                {
-                                    "prompt": str(ind),
-                                    "score": ind.fitness.values[0],
-                                    "length": ind.fitness.values[1],
-                                }
-                                for ind in hof
-                            ]
-                            if hof
-                            else []
+                    report_evolutionary_algo.start_gen(generation_idx, self.num_generations)
+
+                    curr_best_score = self._population_best_score(deap_population)
+
+                    # ---------- restart logic -------------------------------------
+                    (
+                        should_restart,
+                        gens_since_pop_improvement,
+                        best_primary_score_history,
+                    ) = population_ops.should_restart_population(
+                        curr_best=curr_best_score,
+                        best_primary_score_history=self._best_primary_score_history,
+                        gens_since_pop_improvement=self._gens_since_pop_improvement,
+                        default_restart_threshold=self.DEFAULT_RESTART_THRESHOLD,
+                        default_restart_generations=self.DEFAULT_RESTART_GENERATIONS,
+                    )
+                    self._gens_since_pop_improvement = gens_since_pop_improvement
+                    self._best_primary_score_history = best_primary_score_history
+
+                    if should_restart:
+                        report_evolutionary_algo.restart_population(
+                            self.DEFAULT_RESTART_GENERATIONS
+                        )
+                        deap_population = population_ops.restart_population(
+                            optimizer=self,
+                            hof=hof,
+                            population=deap_population,
+                            best_prompt_so_far=best_prompt_overall,
+                        )
+
+                    # ---------- run one generation --------------------------------
+                    deap_population, invalid_count = self._run_generation(
+                        generation_idx,
+                        deap_population,
+                        prompt,
+                        hof,
+                        report_evolutionary_algo,
+                        best_primary_score_overall,
+                    )
+
+                    # -------- update best-prompt bookkeeping -------------------------
+                    previous_best_primary_score_for_gen = best_primary_score_overall
+                    if hof:
+                        if self.enable_moo:
+                            current_best_ind = max(
+                                hof, key=lambda ind: ind.fitness.values[0]
+                            )
+                        else:
+                            current_best_ind = hof[0]
+
+                        updated_best_primary_score = current_best_ind.fitness.values[0]
+                        if updated_best_primary_score > best_primary_score_overall:
+                            best_primary_score_overall = updated_best_primary_score
+                            self._generations_without_overall_improvement = 0
+                        elif (
+                            updated_best_primary_score
+                            == previous_best_primary_score_for_gen
+                        ):
+                            self._generations_without_overall_improvement += 1
+                        else:
+                            self._generations_without_overall_improvement += 1
+                    else:
+                        self._generations_without_overall_improvement += 1
+
+                    # ---------- early-stopping check ------------------------------
+                    if (
+                        self._generations_without_overall_improvement
+                        >= self.DEFAULT_EARLY_STOPPING_GENERATIONS
+                    ):
+                        logger.info(
+                            "No overall improvement for %d generations – early stopping at gen %d.",
+                            self.DEFAULT_EARLY_STOPPING_GENERATIONS,
+                            generation_idx,
+                        )
+                        break
+
+                    # History logging for this transition
+                    # FIXME: Use model.dump() instead of dict()
+                    gen_round_data = OptimizationRound(
+                        round_number=generation_idx,
+                        current_prompt=best_prompt_overall,  # Representative best
+                        current_score=best_primary_score_overall,
+                        generated_prompts=[
+                            {"prompt": str(ind), "score": ind.fitness.values[0]}
+                            for ind in deap_population
+                            if ind.fitness.valid
+                        ],
+                        best_prompt=best_prompt_overall,
+                        best_score=best_primary_score_overall,
+                        improvement=(
+                            (best_primary_score_overall - initial_primary_score)
+                            / abs(initial_primary_score)
+                            if initial_primary_score and initial_primary_score != 0
+                            else (1.0 if best_primary_score_overall > 0 else 0.0)
                         ),
-                    }
-                )
+                    )
+                    self._add_to_history(gen_round_data)
+
+            stopped_early_flag = (
+                self._generations_without_overall_improvement
+                >= self.DEFAULT_EARLY_STOPPING_GENERATIONS
+            )
+            final_details = {}
+            initial_score_for_display = initial_primary_score
+
+            if self.enable_moo:
+                final_results_log = "Pareto Front Solutions:\n"
+                if hof and len(hof) > 0:
+                    sorted_hof = sorted(
+                        hof, key=lambda ind: ind.fitness.values[0], reverse=True
+                    )
+                    for i, sol in enumerate(sorted_hof):
+                        final_results_log += f"  Solution {i + 1}: Primary Score={sol.fitness.values[0]:.4f}, Length={sol.fitness.values[1]:.0f}, Prompt='{str(sol)[:100]}...'\n"
+                    best_overall_solution = sorted_hof[0]
+                    final_best_prompt = chat_prompt.ChatPrompt(
+                        messages=best_overall_solution,
+                        tools=getattr(best_overall_solution, "tools", prompt.tools),
+                        function_map=getattr(
+                            best_overall_solution, "function_map", prompt.function_map
+                        ),
+                        model=getattr(best_overall_solution, "model", prompt.model),
+                        model_parameters=getattr(
+                            best_overall_solution, "model_kwargs", prompt.model_kwargs
+                        ),
+                    )
+                    final_primary_score = best_overall_solution.fitness.values[0]
+                    final_length = best_overall_solution.fitness.values[1]
+                    logger.info(final_results_log)
+                    logger.info(
+                        f"Representative best prompt (highest primary score from Pareto front): '{final_best_prompt}'"
+                    )
+                    logger.info(
+                        f"  Primary Score ({metric.__name__}): {final_primary_score:.4f}"
+                    )
+                    logger.info(f"  Length: {final_length:.0f}")
+                    final_details.update(
+                        {
+                            "initial_primary_score": initial_primary_score,
+                            "initial_length": initial_length,
+                            "final_prompt_representative": final_best_prompt,
+                            "final_primary_score_representative": final_primary_score,
+                            "final_length_representative": final_length,
+                            "pareto_front_solutions": (
+                                [
+                                    {
+                                        "prompt": str(ind),
+                                        "score": ind.fitness.values[0],
+                                        "length": ind.fitness.values[1],
+                                    }
+                                    for ind in hof
+                                ]
+                                if hof
+                                else []
+                            ),
+                        }
+                    )
+                else:
+                    # MOO: ParetoFront is empty. Reporting last known best and fallback values
+                    logger.warning("MOO: ParetoFront is empty. Reporting last known best.")
+                    final_best_prompt = best_prompt_overall
+                    final_primary_score = best_primary_score_overall
+                    final_length = float(len(json.dumps(final_best_prompt.get_messages())))
+                    final_details.update(
+                        {
+                            "initial_primary_score": initial_primary_score,
+                            "initial_length": initial_length,
+                            "final_prompt_representative": final_best_prompt,
+                            "final_primary_score_representative": final_primary_score,
+                            "final_length_representative": final_length,
+                            "pareto_front_solutions": [],
+                        }
+                    )
             else:
-                # MOO: ParetoFront is empty. Reporting last known best and fallback values
-                logger.warning("MOO: ParetoFront is empty. Reporting last known best.")
+                # Single-objective
                 final_best_prompt = best_prompt_overall
                 final_primary_score = best_primary_score_overall
-                final_length = float(len(json.dumps(final_best_prompt.get_messages())))
+                logger.info(f"Final best prompt from Hall of Fame: '{final_best_prompt}'")
+                logger.info(
+                    f"Final best score ({metric.__name__}): {final_primary_score:.4f}"
+                )
                 final_details.update(
                     {
-                        "initial_primary_score": initial_primary_score,
-                        "initial_length": initial_length,
-                        "final_prompt_representative": final_best_prompt,
-                        "final_primary_score_representative": final_primary_score,
-                        "final_length_representative": final_length,
-                        "pareto_front_solutions": [],
+                        "initial_prompt": prompt.get_messages(),
+                        "initial_score": initial_primary_score,
+                        "initial_score_for_display": initial_primary_score,
+                        "final_prompt": final_best_prompt,
+                        "final_score": final_primary_score,
                     }
                 )
-        else:
-            # Single-objective
-            final_best_prompt = best_prompt_overall
-            final_primary_score = best_primary_score_overall
-            logger.info(f"Final best prompt from Hall of Fame: '{final_best_prompt}'")
-            logger.info(
-                f"Final best score ({metric.__name__}): {final_primary_score:.4f}"
-            )
+
+            logger.info(f"Total LLM calls during optimization: {self.llm_call_counter}")
+            logger.info(f"Total prompt evaluations: {trials_used[0]}")
+            if opik_optimization_run:
+                try:
+                    opik_optimization_run.update(status="completed")
+                    logger.info(
+                        f"Opik Optimization run {self.current_optimization_id} status updated to completed."
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update Opik Optimization run status: {e}")
+
+            # Add final details
             final_details.update(
                 {
-                    "initial_prompt": prompt.get_messages(),
-                    "initial_score": initial_primary_score,
-                    "initial_score_for_display": initial_primary_score,
-                    "final_prompt": final_best_prompt,
-                    "final_score": final_primary_score,
+                    "total_generations_run": generation_idx + 1,
+                    "num_generations": self.num_generations,
+                    "population_size": self.population_size,
+                    "mutation_probability": self.mutation_rate,
+                    "crossover_probability": self.crossover_rate,
+                    "elitism_size": (
+                        self.elitism_size
+                        if not self.enable_moo
+                        else "N/A (MOO uses NSGA-II)"
+                    ),
+                    "adaptive_mutation": self.adaptive_mutation,
+                    "metric_name": metric.__name__,
+                    "model": self.model,
+                    "moo_enabled": self.enable_moo,
+                    "llm_crossover_enabled": self.enable_llm_crossover,
+                    "seed": self.seed,
+                    "prompt_type": "single_string_ga",
+                    "initial_score_for_display": initial_score_for_display,
+                    "temperature": self.model_parameters.get("temperature"),
+                    "stopped_early": stopped_early_flag,
+                    "rounds": self.get_history(),
+                    "user_output_style_guidance": self.output_style_guidance,
+                    "infer_output_style_requested": self.infer_output_style,
+                    "final_effective_output_style_guidance": effective_output_style_guidance,
+                    "infer_output_style": self.infer_output_style,
+                    "trials_used": trials_used[0],
                 }
             )
 
-        logger.info(f"Total LLM calls during optimization: {self.llm_call_counter}")
-        logger.info(f"Total prompt evaluations: {trials_used[0]}")
-        if opik_optimization_run:
-            try:
-                opik_optimization_run.update(status="completed")
-                logger.info(
-                    f"Opik Optimization run {self.current_optimization_id} status updated to completed."
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update Opik Optimization run status: {e}")
+            # Return the OptimizationResult
+            reporting.display_result(
+                initial_score=initial_score_for_display,
+                best_score=final_primary_score,
+                best_prompt=final_best_prompt.get_messages(),
+                verbose=self.verbose,
+                tools=getattr(final_best_prompt, "tools", None),
+            )
 
-        # Add final details
-        final_details.update(
-            {
-                "total_generations_run": generation_idx + 1,
-                "num_generations": self.num_generations,
-                "population_size": self.population_size,
-                "mutation_probability": self.mutation_rate,
-                "crossover_probability": self.crossover_rate,
-                "elitism_size": (
-                    self.elitism_size
-                    if not self.enable_moo
-                    else "N/A (MOO uses NSGA-II)"
-                ),
-                "adaptive_mutation": self.adaptive_mutation,
-                "metric_name": metric.__name__,
-                "model": self.model,
-                "moo_enabled": self.enable_moo,
-                "llm_crossover_enabled": self.enable_llm_crossover,
-                "seed": self.seed,
-                "prompt_type": "single_string_ga",
-                "initial_score_for_display": initial_score_for_display,
-                "temperature": self.model_parameters.get("temperature"),
-                "stopped_early": stopped_early_flag,
-                "rounds": self.get_history(),
-                "user_output_style_guidance": self.output_style_guidance,
-                "infer_output_style_requested": self.infer_output_style,
-                "final_effective_output_style_guidance": effective_output_style_guidance,
-                "infer_output_style": self.infer_output_style,
-                "trials_used": trials_used[0],
-            }
-        )
+            final_tools = getattr(final_best_prompt, "tools", None)
+            if final_tools:
+                final_details["final_tools"] = final_tools
+            tool_prompts = self._extract_tool_prompts(final_tools)
 
-        # Return the OptimizationResult
-        reporting.display_result(
-            initial_score=initial_score_for_display,
-            best_score=final_primary_score,
-            best_prompt=final_best_prompt.get_messages(),
-            verbose=self.verbose,
-            tools=getattr(final_best_prompt, "tools", None),
-        )
-
-        final_tools = getattr(final_best_prompt, "tools", None)
-        if final_tools:
-            final_details["final_tools"] = final_tools
-        tool_prompts = self._extract_tool_prompts(final_tools)
-
-        return OptimizationResult(
-            optimizer=self.__class__.__name__,
-            prompt=final_best_prompt.get_messages(),
-            score=final_primary_score,
-            initial_prompt=prompt.get_messages(),
-            initial_score=initial_primary_score,
-            metric_name=metric.__name__,
-            details=final_details,
-            history=[x.model_dump() for x in self.get_history()],
-            llm_calls=self.llm_call_counter,
-            tool_calls=self.tool_call_counter,
-            dataset_id=dataset.id,
-            optimization_id=self.current_optimization_id,
-            tool_prompts=tool_prompts,
-        )
+            return OptimizationResult(
+                optimizer=self.__class__.__name__,
+                prompt=final_best_prompt.get_messages(),
+                score=final_primary_score,
+                initial_prompt=prompt.get_messages(),
+                initial_score=initial_primary_score,
+                metric_name=metric.__name__,
+                details=final_details,
+                history=[x.model_dump() for x in self.get_history()],
+                llm_calls=self.llm_call_counter,
+                tool_calls=self.tool_call_counter,
+                dataset_id=dataset.id,
+                optimization_id=self.current_optimization_id,
+                tool_prompts=tool_prompts,
+            )
+            
+        finally:
+            # ✅ STOP HEARTBEAT (guaranteed)
+            self._stop_heartbeat()
 
     def optimize_mcp(
         self,
@@ -1073,3 +1085,4 @@ class EvolutionaryOptimizer(BaseOptimizer):
 
     def _get_radical_innovation_system_prompt(self) -> str:
         return evo_prompts.radical_innovation_system_prompt(self.output_style_guidance)
+    

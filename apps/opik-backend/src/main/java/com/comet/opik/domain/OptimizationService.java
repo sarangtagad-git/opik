@@ -67,6 +67,9 @@ public interface OptimizationService {
 
     // Studio methods
     Mono<OptimizationStudioLog> generateStudioLogsResponse(UUID optimizationId);
+
+    //Added
+    Mono<Void> heartbeat(@NonNull UUID optimizationId);
 }
 
 @Singleton
@@ -272,6 +275,17 @@ class OptimizationServiceImpl implements OptimizationService {
                                 }
                             });
                 }));
+    }
+    //Added
+    @Override
+    @WithSpan
+    public Mono<Void> heartbeat(@NonNull UUID optimizationId) {
+        return optimizationDAO.getById(optimizationId)
+                .switchIfEmpty(Mono.error(failWithNotFound("Optimization", optimizationId)))
+                .then(Mono.defer(() ->
+                        optimizationDAO.updateLastUpdatedAt(optimizationId)
+                ))
+                .then();
     }
 
     /**
